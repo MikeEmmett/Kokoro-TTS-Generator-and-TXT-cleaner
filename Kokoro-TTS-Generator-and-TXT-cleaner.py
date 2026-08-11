@@ -10,7 +10,6 @@ import re
 def check_and_install_requirements():
     """Checks for required modules and installs them via pip if missing."""
     
-    # Warn if using Python 3.13 or higher (due to numpy/kokoro compatibility issues)
     if sys.version_info >= (3, 13):
         print("⚠️ WARNING: You are running Python 3.13 or higher.")
         print("Many AI and audio libraries (like kokoro and older numpy versions) do not have pre-built packages for 3.13 yet.")
@@ -35,7 +34,6 @@ def check_and_install_requirements():
         print(f"📦 Missing required packages detected: {', '.join(missing_packages)}")
         print("⏳ Installing them globally now (this may take a few minutes)...")
         try:
-            # Added --upgrade to ensure we get the best compatible versions
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install", "--upgrade", *missing_packages
             ])
@@ -68,6 +66,17 @@ text_model = None
 tokenizer = None
 tts_pipeline = None
 
+# Hardware Diagnostic Print
+print("\n--- Hardware Diagnostic ---")
+if torch.cuda.is_available():
+    print("✅ NVIDIA GPU detected via CUDA.")
+elif torch.backends.mps.is_available():
+    print("✅ Apple Silicon detected via MPS.")
+else:
+    print("⚠️  WARNING: No GPU detected by PyTorch. Falling back to CPU.")
+    print("If you have a GPU, you need to uninstall your current torch version and reinstall the GPU-enabled version.")
+print("---------------------------\n")
+
 # ==========================================
 # 3. AI MODEL LOADING & PROCESSING FUNCTIONS
 # ==========================================
@@ -88,7 +97,14 @@ def load_tts_pipeline(lang_code, progress=gr.Progress()):
     global tts_pipeline
     if tts_pipeline is None or getattr(tts_pipeline, 'lang_code', None) != lang_code:
         progress(0, desc="Loading Kokoro TTS Model...")
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        if torch.cuda.is_available():
+            device = 'cuda'
+        elif torch.backends.mps.is_available():
+            device = 'mps'
+        else:
+            device = 'cpu'
+            
         print(f"🚀 Computing Device for TTS: {device.upper()}")
         tts_pipeline = KPipeline(lang_code=lang_code, device=device)
 
@@ -119,7 +135,6 @@ def process_text_with_ai(raw_text):
     return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
 def run_pipeline(task, input_source, file_upload, text_input, output_filename, voice, progress=gr.Progress()):
-    # GET THE INPUT TEXT
     raw_input = ""
     base_name = output_filename.strip() if output_filename.strip() else "my_output"
 
@@ -142,7 +157,6 @@ def run_pipeline(task, input_source, file_upload, text_input, output_filename, v
     final_txt_path = None
     final_wav_path = None
 
-    # TEXT CLEANER LOGIC
     if "Text Cleaner" in task or "Both" in task:
         load_text_model(progress)
         
@@ -177,7 +191,6 @@ def run_pipeline(task, input_source, file_upload, text_input, output_filename, v
 
         current_text = cleaned_text_accumulated.strip()
 
-    # TTS GENERATOR LOGIC
     if "TTS Generator" in task or "Both" in task:
         lang_code = voice[0]
         load_tts_pipeline(lang_code, progress)
@@ -255,7 +268,6 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator") as demo:
         output_txt_file = gr.File(label="Download Cleaned Text File")
         output_audio_file = gr.Audio(label="Audio Output", type="filepath")
 
-    # Connect UI elements to the function
     submit_btn.click(
         fn=run_pipeline,
         inputs=[task_dropdown, input_source_dropdown, file_upload, text_input, output_filename, voice_dropdown],
