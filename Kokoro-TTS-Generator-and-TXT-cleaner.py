@@ -311,7 +311,7 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
             output_filename = gr.Textbox(
                 label="Output Filename (Optional)", 
                 value="Processed_File",
-                info="Used if inputting via Text Box. File uploads will inherit the original filename."
+                info="Used if inputting via Text Box. File uploads will inherit the original filename. WARNING: If re-using the same Filename, this will blindly REPLACE the old version."
             )
             zip_password = gr.Textbox(
                 label="Zip Password (Optional)", 
