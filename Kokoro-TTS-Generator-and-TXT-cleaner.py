@@ -48,6 +48,9 @@ text_model = None
 text_tokenizer = None
 tts_pipeline = None
 
+# --- GLOBAL STOP FLAG ---
+stop_flag = False
+
 def check_gpu():
     import torch
     if torch.cuda.is_available():
@@ -85,6 +88,9 @@ def load_tts_model(voice):
         print("✅ TTS Model loaded successfully!")
 
 def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt):
+    global stop_flag
+    stop_flag = False  # Reset flag at the start of a new task
+    
     import torch
     import numpy as np
     import soundfile as sf
@@ -99,6 +105,7 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         logs.append(msg)
         
     log("🚀 Starting processing pipeline...")
+    yield "\n".join(logs), None, None  # Update UI in real-time
     
     # 2. Get Input Text
     raw_input = ""
@@ -106,7 +113,8 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
     
     if input_source == "Upload .txt File":
         if not uploaded_file:
-            return "\n".join(logs) + "\n❌ Error: No file uploaded.", None, None
+            yield "\n".join(logs) + "\n❌ Error: No file uploaded.", None, None
+            return
         
         with open(uploaded_file, 'r', encoding='utf-8') as f:
             raw_input = f.read()
@@ -116,7 +124,8 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         raw_input = text_input
 
     if not raw_input.strip():
-        return "\n".join(logs) + "\n⚠️ Error: No text detected.", None, None
+        yield "\n".join(logs) + "\n⚠️ Error: No text detected.", None, None
+        return
 
     current_text = raw_input
     final_txt_path = os.path.join("outputs", f"{base_name}_cleaned.txt")
@@ -126,6 +135,7 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
     # 3. TEXT CLEANER LOGIC
     if "Text Cleaner" in task or "Both" in task:
         log("\n🖨️ STARTING AI TEXT CLEANER...")
+        yield "\n".join(logs), None, None
         load_text_model()
         
         def process_text_with_ai(raw_text):
@@ -163,13 +173,21 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
             chunks.append(current_chunk.strip())
 
         log(f"🧩 Document safely split into {len(chunks)} manageable chunks.")
+        yield "\n".join(logs), None, None
 
         # Clear output file
         with open(final_txt_path, "w", encoding="utf-8") as f:
             f.write("")
 
         for i, chunk in enumerate(chunks):
+            if stop_flag:
+                log("🛑 Text Cleaner interrupted by user. Saving partial progress...")
+                yield "\n".join(logs), None, None
+                break
+
             log(f"⏳ Cleaning section {i+1} of {len(chunks)}...")
+            yield "\n".join(logs), None, None  # Update UI
+            
             cleaned_chunk = process_text_with_ai(chunk)
             with open(final_txt_path, "a", encoding="utf-8") as f:
                 f.write(cleaned_chunk + "\n\n")
@@ -181,32 +199,43 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
             current_text = f.read()
             
         output_files_for_download.append(final_txt_path)
+        yield "\n".join(logs), None, None
 
     # 4. TTS GENERATOR LOGIC
-    if "TTS Generator" in task or "Both" in task:
-        log("\n🎙️ STARTING KOKORO TTS GENERATOR...")
-        load_tts_model(voice)
-        
-        log(f"Generating speech for voice: {voice}...")
-        text_chunks = [chunk.strip() for chunk in re.split(r'(?<=[.!?\n])\s+', current_text) if chunk.strip()]
-        total_chunks = len(text_chunks)
-        audio_chunks = []
+    if ("TTS Generator" in task or "Both" in task) and not (stop_flag and "Both" not in task):
+        # Only start TTS if user didn't stop during the text cleaner phase (or if running TTS alone)
+        if not stop_flag or "Both" not in task:
+            log("\n🎙️ STARTING KOKORO TTS GENERATOR...")
+            yield "\n".join(logs), None, None
+            load_tts_model(voice)
+            
+            log(f"Generating speech for voice: {voice}...")
+            text_chunks = [chunk.strip() for chunk in re.split(r'(?<=[.!?\n])\s+', current_text) if chunk.strip()]
+            total_chunks = len(text_chunks)
+            audio_chunks = []
 
-        for i, chunk_text in enumerate(text_chunks):
-            generator = tts_pipeline(chunk_text, voice=voice, speed=1.0)
-            for graphemes, phonemes, audio in generator:
-                audio_chunks.append(audio)
-            log(f"  -> Processed audio chunk {i+1} out of {total_chunks}...")
+            for i, chunk_text in enumerate(text_chunks):
+                if stop_flag:
+                    log("🛑 TTS generation interrupted by user. Compiling audio generated so far...")
+                    yield "\n".join(logs), None, None
+                    break
 
-        if audio_chunks:
-            log("Merging audio chunks...")
-            final_audio = np.concatenate(audio_chunks)
-            sf.write(final_wav_path, final_audio, 24000)
-            log(f"✅ Successfully created audio: {final_wav_path}")
-            audio_output_file = final_wav_path
-            output_files_for_download.append(final_wav_path)
-        else:
-            log("❌ Error: No audio was generated.")
+                generator = tts_pipeline(chunk_text, voice=voice, speed=1.0)
+                for graphemes, phonemes, audio in generator:
+                    audio_chunks.append(audio)
+                log(f"  -> Processed audio chunk {i+1} out of {total_chunks}...")
+                yield "\n".join(logs), None, None  # Update UI
+
+            if audio_chunks:
+                log("Merging audio chunks...")
+                final_audio = np.concatenate(audio_chunks)
+                sf.write(final_wav_path, final_audio, 24000)
+                log(f"✅ Successfully created audio: {final_wav_path}")
+                audio_output_file = final_wav_path
+                output_files_for_download.append(final_wav_path)
+            else:
+                log("❌ Error: No audio was generated.")
+            yield "\n".join(logs), audio_output_file, output_files_for_download
 
     # 5. ENCRYPTION LOGIC (7-zip)
     if zip_password.strip() and output_files_for_download:
@@ -214,6 +243,8 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
             log("⚠️ Warning: 7-zip is not installed on this system. Skipping encryption.")
         else:
             log(f"🔒 Encrypting output files...")
+            yield "\n".join(logs), audio_output_file, output_files_for_download
+            
             encrypted_files = []
             for file_path in output_files_for_download:
                 archive_name = f"{file_path}.7z"
@@ -224,9 +255,19 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
             # Offer the encrypted files for download instead of the raw ones
             output_files_for_download = encrypted_files
 
-    log("\n✨ All tasks completed successfully!")
-    return "\n".join(logs), audio_output_file, output_files_for_download
+    if stop_flag:
+        log("\n⚠️ Task was stopped early, but partial outputs are available below.")
+    else:
+        log("\n✨ All tasks completed successfully!")
+        
+    yield "\n".join(logs), audio_output_file, output_files_for_download
 
+
+# --- STOP TASK FUNCTION ---
+def request_stop():
+    global stop_flag
+    stop_flag = True
+    return gr.update(value="🛑 Stop requested... waiting for the current chunk to finish before exiting.")
 
 # ==========================================
 # GRADIO WEB UI SETUP
@@ -293,7 +334,10 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
             value="You are an expert audio-text preparer. Your task is to clean this text so it reads smoothly for Text-to-Speech processing. 1. Remove random line breaks to reconstruct proper flowing paragraphs. 2. Fix broken hyphenations (e.g., 'para- graph' becomes 'paragraph'). 3. Normalize spacing by removing extra spaces or tabs. 4. Delete inline headers, footers, page numbers, and stray isolated numbers. 5. DO NOT rewrite, summarize, or change the author's original words. Output ONLY the cleaned text with no conversational filler."
         )
 
-    submit_btn = gr.Button("🚀 Process Now", variant="primary", size="lg")
+    # Adding the Stop button next to the Process button
+    with gr.Row():
+        submit_btn = gr.Button("🚀 Process Now", variant="primary", size="lg")
+        stop_btn = gr.Button("🛑 Stop Task", variant="stop", size="lg")
     
     gr.Markdown("---")
     gr.Markdown("### 📥 Outputs")
@@ -312,6 +356,13 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
             output_filename, zip_password, voice_dropdown, system_prompt
         ],
         outputs=[status_log, audio_player, file_downloader]
+    )
+
+    # Wire up the stop button
+    stop_btn.click(
+        fn=request_stop,
+        inputs=None,
+        outputs=[status_log]
     )
 
 if __name__ == "__main__":
