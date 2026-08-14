@@ -63,9 +63,11 @@ def load_text_model():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     
     if text_model is None or text_tokenizer is None:
-        print("⏳ Loading Qwen2.5-3B-Instruct into GPU...")
-        model_name = "Qwen/Qwen2.5-3B-Instruct"
+        model_name = "dphn/Dolphin3.0-Qwen2.5-1.5B"
+        print(f"⏳ Loading {model_name} into GPU...")
+        
         text_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
         text_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
@@ -79,9 +81,8 @@ def load_tts_model(voice):
     from kokoro import KPipeline
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    lang_code = voice[0] # Usually 'a' or 'b'
+    lang_code = voice[0] 
     
-    # Reload if pipeline isn't loaded or language code changed
     if tts_pipeline is None or tts_pipeline.lang_code != lang_code:
         print(f"⏳ Loading Kokoro-82M model ({lang_code}) onto {device.upper()}...")
         tts_pipeline = KPipeline(lang_code=lang_code, device=device)
@@ -140,8 +141,8 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         
         def process_text_with_ai(raw_text):
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Please clean the following text:\n\n{raw_text}"}
+               {"role": "system", "content": system_prompt},
+               {"role": "user", "content": f"Here is the text to process:\n\n{raw_text}"}
             ]
             formatted_prompt = text_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             model_inputs = text_tokenizer([formatted_prompt], return_tensors="pt").to(text_model.device)
