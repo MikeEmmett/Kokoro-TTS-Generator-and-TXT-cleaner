@@ -35,20 +35,17 @@ check_and_install("kokoro")
 check_and_install("numpy")
 print("✅ All dependencies are satisfied.\n")
 
-# Now it is safe to import gradio
 import gradio as gr
 
 # --- BYPASS HUGGING FACE TOKEN POPUP ---
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 os.environ["HF_HUB_DISABLE_TOKEN_WARNING"] = "1"
 
-# --- LAZY LOADING GLOBALS ---
-# We keep these global so they only load into VRAM once per session
+# --- LOADING GLOBALS ---
 text_model = None
 text_tokenizer = None
+current_model_name = None
 tts_pipeline = None
-
-# --- GLOBAL STOP FLAG ---
 stop_flag = False
 
 def check_gpu():
@@ -57,22 +54,31 @@ def check_gpu():
         return f"✅ GPU Available: {torch.cuda.get_device_name(0)}"
     return "⚠️ WARNING: GPU not detected. Generation will be slow (CPU only)."
 
-def load_text_model():
-    global text_model, text_tokenizer
+def load_text_model(model_name):
+    global text_model, text_tokenizer, current_model_name
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     
+    # If the user switched models, clear the old one out of VRAM first
+    if current_model_name != model_name:
+        if text_model is not None:
+            print("🧹 Clearing VRAM for new text model...")
+            text_model = None
+            text_tokenizer = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
     if text_model is None or text_tokenizer is None:
-        model_name = "dphn/Dolphin3.0-Qwen2.5-1.5B"
         print(f"⏳ Loading {model_name} into GPU...")
         
         text_tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         text_model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto"
         )
+        current_model_name = model_name
         print("✅ Text Model loaded successfully!")
 
 def load_tts_model(voice):
@@ -88,7 +94,7 @@ def load_tts_model(voice):
         tts_pipeline = KPipeline(lang_code=lang_code, device=device)
         print("✅ TTS Model loaded successfully!")
 
-def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt):
+def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt, model_choice):
     global stop_flag
     stop_flag = False  # Reset flag at the start of a new task
     
@@ -137,7 +143,9 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
     if "Text Cleaner" in task or "Both" in task:
         log("\n🖨️ STARTING AI TEXT CLEANER...")
         yield "\n".join(logs), None, None
-        load_text_model()
+        
+        # Load the specific model chosen by the user
+        load_text_model(model_choice)
         
         def process_text_with_ai(raw_text):
             messages = [
@@ -273,6 +281,11 @@ def request_stop():
 # ==========================================
 # GRADIO WEB UI SETUP
 # ==========================================
+system_prompt_options = [
+    "You are an expert audio-text preparer. Your task is to clean this text so it reads smoothly for Text-to-Speech processing. 1. Remove random line breaks to reconstruct proper flowing paragraphs. 2. Fix broken hyphenations (e.g., 'para- graph' becomes 'paragraph'). 3. Normalize spacing by removing extra spaces or tabs. 4. Delete inline headers, footers, page numbers, and stray isolated numbers. 5. DO NOT rewrite, summarize, or change the author's original words. Output ONLY the cleaned text with no conversational filler.",
+    "You are an expert storyteller and creative writer. Your task is to write a long, immersive story based on the provided text or concept. 1. Develop a complete narrative arc with a clear beginning, engaging middle, and satisfying resolution. 2. Flesh out vivid settings and dynamic characters using rich sensory details and meaningful dialogue. 3. Expand upon the original concept to ensure the story is lengthy, detailed, and well-paced. 4. Maintain a consistent tone that fits the natural genre of the input. 5. DO NOT include introductions, meta-commentary, or conversational filler. Output ONLY the story itself."
+]
+
 with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🛠️ AI Text Cleaner & 🎙️ TTS Generator")
     gr.Markdown(f"**System Status:** {check_gpu()}")
@@ -328,11 +341,26 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
                 allow_custom_value=True
             )
 
-    with gr.Accordion("🛠️ Advanced Settings", open=False):
-        system_prompt = gr.Textbox(
+    with gr.Accordion("🛠️ Advanced Settings (Models & Prompts)", open=False):
+        model_dropdown = gr.Dropdown(
+            choices=[
+                ("Qwen 2.5 3B Instruct - Best all-rounder for accurate text cleaning", "Qwen/Qwen2.5-3B-Instruct"),
+                ("Dolphin 3.0 Qwen 3B - Uncensored, great for storytelling & unrestricted text", "dphn/Dolphin3.0-Qwen2.5-3b"),
+                ("Dolphin 3.0 Llama 3.2 3B - Uncensored Llama alternative, strong reasoning", "dphn/Dolphin3.0-Llama3.2-3B"),
+                ("Dolphin 3.0 Qwen 1.5B - Fastest generation, lowest VRAM usage", "dphn/Dolphin3.0-Qwen2.5-1.5B")
+            ],
+            value="Qwen/Qwen2.5-3B-Instruct",
+            label="Text Processing Model Selection",
+            allow_custom_value=True,
+            info="Select the AI model used to process the text. Changing models will automatically clear VRAM."
+        )
+        
+        system_prompt = gr.Dropdown(
+            choices=system_prompt_options,
+            value=system_prompt_options[0],
             label="System Prompt for Text Cleaner",
-            lines=4,
-            value="You are an expert audio-text preparer. Your task is to clean this text so it reads smoothly for Text-to-Speech processing. 1. Remove random line breaks to reconstruct proper flowing paragraphs. 2. Fix broken hyphenations (e.g., 'para- graph' becomes 'paragraph'). 3. Normalize spacing by removing extra spaces or tabs. 4. Delete inline headers, footers, page numbers, and stray isolated numbers. 5. DO NOT rewrite, summarize, or change the author's original words. Output ONLY the cleaned text with no conversational filler."
+            allow_custom_value=True,
+            info="You can choose a default preset or type your own custom processing instructions directly into this box."
         )
 
     # Adding the Stop button next to the Process button
@@ -354,7 +382,7 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
         fn=process_pipeline,
         inputs=[
             task_dropdown, input_source, file_upload, text_input, 
-            output_filename, zip_password, voice_dropdown, system_prompt
+            output_filename, zip_password, voice_dropdown, system_prompt, model_dropdown
         ],
         outputs=[status_log, audio_player, file_downloader]
     )
