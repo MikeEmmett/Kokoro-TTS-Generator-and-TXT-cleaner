@@ -97,7 +97,7 @@ def load_tts_model(voice):
         print("✅ TTS Model loaded successfully!")
 
 def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt, model_choice, recursion_loops, repetition_penalty):
-    global stop_flag
+    global stop_flag, text_model, text_tokenizer, current_model_name, tts_pipeline
     stop_flag = False  # Reset flag at the start of a new task
     
     import torch
@@ -326,6 +326,14 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         log("\n⚠️ Task was stopped early, but partial outputs are available below.")
     else:
         log("\n✨ All tasks completed successfully!")
+
+    log("\n🧹 Purging models from memory to free up RAM...")
+    
+    # 1. Destroy all model references
+    text_model = None
+    text_tokenizer = None
+    current_model_name = None
+    tts_pipeline = None
         
     # Final aggressive memory clear at the complete end of the pipeline
     gc.collect()
@@ -401,6 +409,8 @@ with gr.Blocks(title="AI Text Processor & TTS Generator", theme=gr.themes.Soft()
             )
             
             gr.Markdown("### 3. TTS Settings")
+            gr.Markdown("voice: Select the voice you wish to use. All valid entities and samples can be found [HERE](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX#voicessamples) in the Voices/Samples section.")
+            gr.Markdown("Note: Voice format is a/b (American/British) f/m (Feminine/Masculine) _name, E.G. af_nova = An American, Feminine voice.")
             voice_dropdown = gr.Dropdown(
                 choices=["af_nova", "af_heart", "bf_emma", "am_fenrir", "bm_daniel"],
                 value="af_nova",
