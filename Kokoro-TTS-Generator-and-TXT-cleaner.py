@@ -360,6 +360,27 @@ with gr.Blocks(title="AI Text Processor & TTS Generator", theme=gr.themes.Soft()
     gr.Markdown("# 🛠️ AI Text Processor & 🎙️ TTS Generator")
     gr.Markdown(f"**System Status:** {check_gpu()}")
     
+    gr.Markdown(
+    """
+# Kokoro TextToSpeech (TTS) Generator and TXT cleaner.
+
+This delightful little tool leverages [Kokoro TTS](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) and a selection of LLM models to process .txt files within Google Colab, requiring absolutely no technical wizardry on your part.
+
+It has been designed for exceptional simplicity, it transforms or generates your reading material with just a few easy steps:
+
+1. **Copy and Paste**: Gather your source text and paste it directly into Notepad, TextEdit, or your favorite text editor.
+
+2. **Save**: Save the document as a standard .txt file. There is no need to fuss over formatting or tidy up the layout!<br />
+**Want more total generation?:** This has a tool to generate full stories for you or expand on what it is given.
+
+3. **Listen**: Sit back, and let it spin your plain text into a beautiful, audiobook style masterpiece.
+
+Consider it your personal, tireless narrator, ready to bring your documents to life at a moment's notice!
+
+**Note**: The AI Text Cleaner tries its best to preserve your text, but it can be a tiny bit unpredictable! It might ***occasionally*** tweak wording or formatting, making each run slightly unique. Because of these little quirks, please don't use it for strict math or technical documents where exact punctuation is super important!
+"""
+)
+    
     with gr.Row():
         with gr.Column():
             gr.Markdown("### 1. Task & Source")
