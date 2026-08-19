@@ -94,7 +94,7 @@ def load_tts_model(voice):
         tts_pipeline = KPipeline(lang_code=lang_code, device=device)
         print("✅ TTS Model loaded successfully!")
 
-def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt, model_choice):
+def process_pipeline(task, input_source, uploaded_file, text_input, output_filename, zip_password, voice, system_prompt, model_choice, recursion_loops, repetition_penalty):
     global stop_flag
     stop_flag = False  # Reset flag at the start of a new task
     
@@ -139,25 +139,22 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
     final_wav_path = os.path.join("outputs", f"{base_name}_cleaned.wav" if "Both" in task else f"{base_name}.wav")
     audio_output_file = None
 
-    # 3. TEXT CLEANER LOGIC
+    # 3. TEXT PROCESSOR LOGIC
     if "Text Cleaner" in task or "Both" in task:
-        log("\n🖨️ STARTING AI TEXT CLEANER...")
+        log("\n🖨️ STARTING AI TEXT PROCESSOR...")
         yield "\n".join(logs), None, None
         
         # Load the specific model chosen by the user
         load_text_model(model_choice)
         
-        def process_text_with_ai(raw_text):
-            messages = [
-               {"role": "system", "content": system_prompt},
-               {"role": "user", "content": f"Here is the text to process:\n\n{raw_text}"}
-            ]
+        def process_text_with_ai(messages):
             formatted_prompt = text_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             model_inputs = text_tokenizer([formatted_prompt], return_tensors="pt").to(text_model.device)
             generated_ids = text_model.generate(
                 **model_inputs,
                 max_new_tokens=2000,
                 temperature=0.1,
+                repetition_penalty=repetition_penalty,
                 do_sample=True,
             )
             generated_ids = [
@@ -187,21 +184,57 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         # Clear output file
         with open(final_txt_path, "w", encoding="utf-8") as f:
             f.write("")
+            
+        full_generated_story = ""
 
+        # PASS 1: Process initial chunks
         for i, chunk in enumerate(chunks):
             if stop_flag:
-                log("🛑 Text Cleaner interrupted by user. Saving partial progress...")
+                log("🛑 Text Processor interrupted by user. Saving partial progress...")
                 yield "\n".join(logs), None, None
                 break
 
-            log(f"⏳ Cleaning section {i+1} of {len(chunks)}...")
+            log(f"⏳ Processing section {i+1} of {len(chunks)}...")
             yield "\n".join(logs), None, None  # Update UI
             
-            cleaned_chunk = process_text_with_ai(chunk)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Please process the following text:\n\n{chunk}"}
+            ]
+            
+            processed_chunk = process_text_with_ai(messages)
+            full_generated_story += processed_chunk + "\n\n"
+            
             with open(final_txt_path, "a", encoding="utf-8") as f:
-                f.write(cleaned_chunk + "\n\n")
+                f.write(processed_chunk + "\n\n")
 
-        log(f"🎉 Cleaned text saved to: {final_txt_path}")
+        # PASS 2: Recursive text expansion
+        if recursion_loops > 1 and not stop_flag:
+            log(f"\n🔄 Starting recursion to expand the text ({recursion_loops - 1} additional passes)...")
+            yield "\n".join(logs), None, None
+            
+            for loop in range(recursion_loops - 1):
+                if stop_flag:
+                    log("🛑 Recursion interrupted by user. Saving progress...")
+                    yield "\n".join(logs), None, None
+                    break
+
+                log(f"⏳ Recursion loop {loop+1} of {recursion_loops - 1}...")
+                yield "\n".join(logs), None, None
+                
+                # Supply the ENTIRE story generated so far as context
+                recursion_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Here is the text generated so far:\n\n{full_generated_story.strip()}\n\nPlease continue the story/text from exactly where it left off. Maintain the same style, tone, and formatting. Expand upon the narrative. Do not repeat what was already written. Output ONLY the new continuation without any commentary."}
+                ]
+
+                continuation = process_text_with_ai(recursion_messages)
+                full_generated_story += continuation + "\n\n"
+
+                with open(final_txt_path, "a", encoding="utf-8") as f:
+                    f.write(continuation + "\n\n")
+
+        log(f"🎉 Processed text saved to: {final_txt_path}")
         
         # Reload text for TTS step
         with open(final_txt_path, "r", encoding="utf-8") as f:
@@ -212,7 +245,7 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
 
     # 4. TTS GENERATOR LOGIC
     if ("TTS Generator" in task or "Both" in task) and not (stop_flag and "Both" not in task):
-        # Only start TTS if user didn't stop during the text cleaner phase (or if running TTS alone)
+        # Only start TTS if user didn't stop during the text processor phase
         if not stop_flag or "Both" not in task:
             log("\n🎙️ STARTING KOKORO TTS GENERATOR...")
             yield "\n".join(logs), None, None
@@ -282,12 +315,12 @@ def request_stop():
 # GRADIO WEB UI SETUP
 # ==========================================
 system_prompt_options = [
-    "You are an expert audio-text preparer. Your task is to clean this text so it reads smoothly for Text-to-Speech processing. 1. Remove random line breaks to reconstruct proper flowing paragraphs. 2. Fix broken hyphenations (e.g., 'para- graph' becomes 'paragraph'). 3. Normalize spacing by removing extra spaces or tabs. 4. Delete inline headers, footers, page numbers, and stray isolated numbers. 5. DO NOT rewrite, summarize, or change the author's original words. Output ONLY the cleaned text with no conversational filler.",
+    "You are an expert audio-text preparer. Your task is to process this text so it reads smoothly for Text-to-Speech processing. 1. Remove random line breaks to reconstruct proper flowing paragraphs. 2. Fix broken hyphenations (e.g., 'para- graph' becomes 'paragraph'). 3. Normalize spacing by removing extra spaces or tabs. 4. Delete inline headers, footers, page numbers, and stray isolated numbers. 5. DO NOT rewrite, summarize, or change the author's original words. Output ONLY the processed text with no conversational filler.",
     "You are an expert storyteller and creative writer. Your task is to write a long, immersive story based on the provided text or concept. 1. Develop a complete narrative arc with a clear beginning, engaging middle, and satisfying resolution. 2. Flesh out vivid settings and dynamic characters using rich sensory details and meaningful dialogue. 3. Expand upon the original concept to ensure the story is lengthy, detailed, and well-paced. 4. Maintain a consistent tone that fits the natural genre of the input. 5. DO NOT include introductions, meta-commentary, or conversational filler. Output ONLY the story itself."
 ]
 
-with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🛠️ AI Text Cleaner & 🎙️ TTS Generator")
+with gr.Blocks(title="AI Text Processor & TTS Generator", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🛠️ AI Text Processor & 🎙️ TTS Generator")
     gr.Markdown(f"**System Status:** {check_gpu()}")
     
     with gr.Row():
@@ -327,6 +360,11 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
                 value="Processed_File",
                 info="Used if inputting via Text Box. File uploads will inherit the original filename. WARNING: If re-using the same Filename, this will blindly REPLACE the old version."
             )
+            recursion_loops = gr.Slider(
+                minimum=1, maximum=20, step=1, value=1, 
+                label="Recursion Loops", 
+                info="How many times should the AI run to expand/continue the text? (1 = process input once. 2+ = continue extending the text, retaining the WHOLE story as context)."
+            )
             zip_password = gr.Textbox(
                 label="Zip Password (Optional)", 
                 type="password",
@@ -349,7 +387,7 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
                 ("Dolphin 3.0 Llama 3.2 3B - Uncensored Llama alternative, strong reasoning", "dphn/Dolphin3.0-Llama3.2-3B"),
                 ("Dolphin 3.0 Qwen 1.5B - Fastest generation, lowest VRAM usage", "dphn/Dolphin3.0-Qwen2.5-1.5B")
             ],
-            value="Qwen/Qwen2.5-3B-Instruct",
+            value="dphn/Dolphin3.0-Qwen2.5-1.5B",
             label="Text Processing Model Selection",
             allow_custom_value=True,
             info="Select the AI model used to process the text. Changing models will automatically clear VRAM."
@@ -358,9 +396,15 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
         system_prompt = gr.Dropdown(
             choices=system_prompt_options,
             value=system_prompt_options[0],
-            label="System Prompt for Text Cleaner",
+            label="System Prompt for Text Processor",
             allow_custom_value=True,
             info="You can choose a default preset or type your own custom processing instructions directly into this box."
+        )
+        
+        repetition_penalty = gr.Slider(
+            minimum=1.0, maximum=2.0, step=0.05, value=1.15, 
+            label="Repetition Penalty",
+            info="Helps prevent the AI from looping or repeating phrases. 1.0 is no penalty, 1.15 is a good default."
         )
 
     # Adding the Stop button next to the Process button
@@ -382,7 +426,8 @@ with gr.Blocks(title="AI Text Cleaner & TTS Generator", theme=gr.themes.Soft()) 
         fn=process_pipeline,
         inputs=[
             task_dropdown, input_source, file_upload, text_input, 
-            output_filename, zip_password, voice_dropdown, system_prompt, model_dropdown
+            output_filename, zip_password, voice_dropdown, system_prompt, model_dropdown,
+            recursion_loops, repetition_penalty
         ],
         outputs=[status_log, audio_player, file_downloader]
     )
