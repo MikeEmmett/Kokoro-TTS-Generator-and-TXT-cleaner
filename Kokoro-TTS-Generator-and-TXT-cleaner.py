@@ -4,6 +4,7 @@ import subprocess
 import importlib.util
 import shutil
 import re
+import gc
 
 # --- PYTHON VERSION CHECK ---
 if sys.version_info < (3, 8):
@@ -65,6 +66,7 @@ def load_text_model(model_name):
             print("🧹 Clearing VRAM for new text model...")
             text_model = None
             text_tokenizer = None
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
@@ -148,19 +150,31 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
         load_text_model(model_choice)
         
         def process_text_with_ai(messages):
-            formatted_prompt = text_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            model_inputs = text_tokenizer([formatted_prompt], return_tensors="pt").to(text_model.device)
-            generated_ids = text_model.generate(
-                **model_inputs,
-                max_new_tokens=2000,
-                temperature=0.1,
-                repetition_penalty=repetition_penalty,
-                do_sample=True,
-            )
-            generated_ids = [
-                output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-            ]
-            return text_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+            # Wrap in no_grad to prevent PyTorch from caching gradients
+            with torch.no_grad():
+                formatted_prompt = text_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                model_inputs = text_tokenizer([formatted_prompt], return_tensors="pt").to(text_model.device)
+                generated_ids = text_model.generate(
+                    **model_inputs,
+                    max_new_tokens=2000,
+                    temperature=0.1,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=True,
+                )
+                output_ids = [
+                    out_ids[len(in_ids):] for in_ids, out_ids in zip(model_inputs.input_ids, generated_ids)
+                ]
+                result = text_tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+            
+            # Explicitly clear memory after each generation
+            del model_inputs
+            del generated_ids
+            del output_ids
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            return result
 
         # Chunking
         chunk_size = 2500
@@ -256,17 +270,24 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
             total_chunks = len(text_chunks)
             audio_chunks = []
 
-            for i, chunk_text in enumerate(text_chunks):
-                if stop_flag:
-                    log("🛑 TTS generation interrupted by user. Compiling audio generated so far...")
-                    yield "\n".join(logs), None, None
-                    break
+            # Wrap in no_grad for TTS as well
+            with torch.no_grad():
+                for i, chunk_text in enumerate(text_chunks):
+                    if stop_flag:
+                        log("🛑 TTS generation interrupted by user. Compiling audio generated so far...")
+                        yield "\n".join(logs), None, None
+                        break
 
-                generator = tts_pipeline(chunk_text, voice=voice, speed=1.0)
-                for graphemes, phonemes, audio in generator:
-                    audio_chunks.append(audio)
-                log(f"  -> Processed audio chunk {i+1} out of {total_chunks}...")
-                yield "\n".join(logs), None, None  # Update UI
+                    generator = tts_pipeline(chunk_text, voice=voice, speed=1.0)
+                    for graphemes, phonemes, audio in generator:
+                        audio_chunks.append(audio)
+                    log(f"  -> Processed audio chunk {i+1} out of {total_chunks}...")
+                    yield "\n".join(logs), None, None  # Update UI
+                    
+                    # Force memory cleanup during TTS generation
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             if audio_chunks:
                 log("Merging audio chunks...")
@@ -275,6 +296,10 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
                 log(f"✅ Successfully created audio: {final_wav_path}")
                 audio_output_file = final_wav_path
                 output_files_for_download.append(final_wav_path)
+                
+                # Cleanup audio arrays
+                del audio_chunks
+                del final_audio
             else:
                 log("❌ Error: No audio was generated.")
             yield "\n".join(logs), audio_output_file, output_files_for_download
@@ -302,8 +327,12 @@ def process_pipeline(task, input_source, uploaded_file, text_input, output_filen
     else:
         log("\n✨ All tasks completed successfully!")
         
+    # Final aggressive memory clear at the complete end of the pipeline
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
     yield "\n".join(logs), audio_output_file, output_files_for_download
-
 
 # --- STOP TASK FUNCTION ---
 def request_stop():
